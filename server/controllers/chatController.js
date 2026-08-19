@@ -101,13 +101,22 @@ exports.askQuestionStream = async (req, res) => {
     }));
     res.write(`event: sources\ndata: ${JSON.stringify({ sources })}\n\n`);
 
-    // 3. Stream LLM tokens to client
-    await generateAnswerStream(query, contextDocuments, (chunkToken) => {
-      res.write(`event: token\ndata: ${JSON.stringify({ token: chunkToken })}\n\n`);
+    let isClientConnected = true;
+    req.on('close', () => {
+      isClientConnected = false;
     });
 
-    res.write(`event: end\ndata: [DONE]\n\n`);
-    return res.end();
+    // 3. Stream LLM tokens to client
+    await generateAnswerStream(query, contextDocuments, (chunkToken) => {
+      if (isClientConnected) {
+        res.write(`event: token\ndata: ${JSON.stringify({ token: chunkToken })}\n\n`);
+      }
+    });
+
+    if (isClientConnected) {
+      res.write(`event: end\ndata: [DONE]\n\n`);
+      return res.end();
+    }
 
   } catch (error) {
     console.error("[ChatController Streaming Error]:", error);

@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const Video = require("../models/Video");
 const Chunk = require("../models/Chunk");
 const { fetchAndChunkTranscript } = require("../services/transcriptService");
@@ -29,9 +30,16 @@ exports.ingestVideo = async (req, res) => {
 
     console.log(`[Video Ingest] Processing request for videoId: ${videoId}`);
 
+    const isDbConnected = mongoose.connection.readyState === 1;
+
     // 1. Check if already processed in MongoDB
-    let video = await Video.findOne({ videoId });
-    const existingChunkCount = await Chunk.countDocuments({ videoId });
+    let video = null;
+    let existingChunkCount = 0;
+
+    if (isDbConnected) {
+      video = await Video.findOne({ videoId });
+      existingChunkCount = await Chunk.countDocuments({ videoId });
+    }
 
     if (video && video.status === 'ready' && existingChunkCount > 0) {
       console.log(`[Video Ingest] Video ${videoId} found in MongoDB with ${existingChunkCount} persistent chunks.`);
@@ -61,17 +69,26 @@ exports.ingestVideo = async (req, res) => {
     }
 
     // 2. Initialize or update Video document
-    if (!video) {
-      video = new Video({
+    if (isDbConnected) {
+      if (!video) {
+        video = new Video({
+          videoId,
+          title: `Lecture (${videoId})`,
+          thumbnailUrl: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
+          status: 'processing'
+        });
+        await video.save();
+      } else {
+        video.status = 'processing';
+        await video.save();
+      }
+    } else {
+      video = {
         videoId,
-        title: `Video ${videoId}`,
+        title: `Lecture (${videoId})`,
         thumbnailUrl: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
         status: 'processing'
-      });
-      await video.save();
-    } else {
-      video.status = 'processing';
-      await video.save();
+      };
     }
 
     // 3. Extract, Chunk, and Index
@@ -88,8 +105,10 @@ exports.ingestVideo = async (req, res) => {
         chunks = await transcribeWithWhisperFallback(videoId);
         ingestionSource = 'whisper-asr';
       } catch (whisperError) {
-        video.status = 'failed';
-        await video.save();
+        if (isDbConnected && video.save) {
+          video.status = 'failed';
+          await video.save();
+        }
         return res.status(400).json({
           error: `Could not extract transcript for this lecture. Details: ${transcriptError.message}`
         });
@@ -106,11 +125,14 @@ exports.ingestVideo = async (req, res) => {
     video.ingestionSource = ingestionSource;
     if (rawTranscript && rawTranscript.length > 0) {
       const last = rawTranscript[rawTranscript.length - 1];
-      video.duration = Math.floor((last.offset + last.duration) / 1000);
+      video.duration = Math.floor((last.offset + (last.duration || 0)) / 1000);
     } else if (chunks.length > 0) {
       video.duration = chunks[chunks.length - 1].endTime;
     }
-    await video.save();
+
+    if (isDbConnected && video.save) {
+      await video.save();
+    }
 
     console.log(`[Video Ingest] Successfully indexed ${chunks.length} chunks for ${videoId}.`);
 

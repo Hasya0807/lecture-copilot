@@ -1,4 +1,5 @@
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const mongoose = require("mongoose");
 const Chunk = require("../models/Chunk");
 const { extractKeywords, STOPWORDS } = require("./transcriptService");
 
@@ -167,9 +168,11 @@ function reciprocalRankFusion(denseScores, sparseScores, kConstant = 60) {
 async function createVectorStore(videoId, chunks) {
   const model = getEmbeddingsModel();
 
-  // Delete previous chunks from MongoDB if any
+  // Delete previous chunks from MongoDB if connected
   try {
-    await Chunk.deleteMany({ videoId });
+    if (mongoose.connection.readyState === 1) {
+      await Chunk.deleteMany({ videoId });
+    }
   } catch (err) {
     console.warn(`MongoDB cleanup warning for ${videoId}:`, err.message);
   }
@@ -219,9 +222,9 @@ async function createVectorStore(videoId, chunks) {
     }
   }
 
-  // Persist to MongoDB
+  // Persist to MongoDB if connected
   try {
-    if (chunkDocs.length > 0) {
+    if (mongoose.connection.readyState === 1 && chunkDocs.length > 0) {
       await Chunk.insertMany(chunkDocs);
     }
   } catch (dbErr) {
@@ -257,24 +260,26 @@ async function loadVectorStore(videoId) {
   }
 
   try {
-    const dbChunks = await Chunk.find({ videoId }).sort({ chunkIndex: 1 }).lean();
-    if (dbChunks && dbChunks.length > 0) {
-      const store = dbChunks.map(c => ({
-        document: {
-          pageContent: c.text,
-          metadata: {
-            videoId: c.videoId,
-            chunkIndex: c.chunkIndex,
-            startTime: c.startTime,
-            endTime: c.endTime,
-            wordCount: c.wordCount,
-            keywords: c.keywords || []
-          }
-        },
-        embedding: c.embedding
-      }));
-      memoryVectorStores[videoId] = store;
-      return store;
+    if (mongoose.connection.readyState === 1) {
+      const dbChunks = await Chunk.find({ videoId }).sort({ chunkIndex: 1 }).lean();
+      if (dbChunks && dbChunks.length > 0) {
+        const store = dbChunks.map(c => ({
+          document: {
+            pageContent: c.text,
+            metadata: {
+              videoId: c.videoId,
+              chunkIndex: c.chunkIndex,
+              startTime: c.startTime,
+              endTime: c.endTime,
+              wordCount: c.wordCount,
+              keywords: c.keywords || []
+            }
+          },
+          embedding: c.embedding
+        }));
+        memoryVectorStores[videoId] = store;
+        return store;
+      }
     }
   } catch (err) {
     console.error(`Failed to load vector store from MongoDB for ${videoId}:`, err.message);

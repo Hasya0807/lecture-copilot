@@ -21,6 +21,7 @@ const ChatWindow = ({ videoId, onSeek, externalPrompt, onClearExternalPrompt }) 
   const [activeStandaloneQuery, setActiveStandaloneQuery] = useState('');
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
+  const abortControllerRef = useRef(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -29,6 +30,15 @@ const ChatWindow = ({ videoId, onSeek, externalPrompt, onClearExternalPrompt }) 
   useEffect(() => {
     scrollToBottom();
   }, [messages, loading]);
+
+  // Clean up ongoing stream on unmount or video switch
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, [videoId]);
 
   // If parent triggers a prompt from quick actions
   useEffect(() => {
@@ -60,10 +70,18 @@ const ChatWindow = ({ videoId, onSeek, externalPrompt, onClearExternalPrompt }) 
     let assistantMessageIndex = null;
 
     try {
+      // Abort any ongoing stream
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      const abortController = new AbortController();
+      abortControllerRef.current = abortController;
+
       // Initiate Server-Sent Events stream request
       const response = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: abortController.signal,
         body: JSON.stringify({
           videoId,
           query: textToSend,
@@ -86,6 +104,7 @@ const ChatWindow = ({ videoId, onSeek, externalPrompt, onClearExternalPrompt }) 
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
       let accumulatedText = '';
+      let currentEvent = 'message';
 
       while (true) {
         const { done, value } = await reader.read();
@@ -94,8 +113,6 @@ const ChatWindow = ({ videoId, onSeek, externalPrompt, onClearExternalPrompt }) 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
         buffer = lines.pop(); // Keep partial line in buffer
-
-        let currentEvent = 'message';
 
         for (const line of lines) {
           const trimmed = line.trim();
@@ -110,6 +127,7 @@ const ChatWindow = ({ videoId, onSeek, externalPrompt, onClearExternalPrompt }) 
             const dataStr = trimmed.replace('data:', '').trim();
 
             if (dataStr === '[DONE]') {
+              currentEvent = 'message';
               break;
             }
 
@@ -157,6 +175,10 @@ const ChatWindow = ({ videoId, onSeek, externalPrompt, onClearExternalPrompt }) 
       });
 
     } catch (err) {
+      if (err.name === 'AbortError') {
+        // Request was aborted cleanly by the user
+        return;
+      }
       console.error("Chat streaming error:", err);
       const errorMessage = err.message || "Failed to generate answer";
       
@@ -182,6 +204,9 @@ const ChatWindow = ({ videoId, onSeek, externalPrompt, onClearExternalPrompt }) 
   };
 
   const handleClearChat = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
     setActiveStandaloneQuery('');
     setMessages([
       { 
